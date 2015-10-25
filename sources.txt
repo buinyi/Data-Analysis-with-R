@@ -1,0 +1,37 @@
+Population 2010 Census
+http://www.togetherweteach.com/TWTIC/uscityinfo/25mo/mopopr/25mopr.htm
+http://www.census.gov/prod/cen2010/cph-2-27.pdf
+
+
+MO zip codes
+http://www.unitedstateszipcodes.org/mo/
+http://www.555us.com/555mo/555mo_zipcodes.htm
+
+
+R: Transformed cartesian coordinate system
+http://docs.ggplot2.org/current/coord_trans.html
+
+
+R: read.csv duplicate 'row.names' are not allowed
+http://stackoverflow.com/questions/8854046/duplicate-row-names-are-not-allowed-error-in-r-programming
+
+R: legend
+http://docs.ggplot2.org/0.9.3.1/guide_legend.html
+
+R: sort data frame
+http://stackoverflow.com/questions/1296646/how-to-sort-a-dataframe-by-columns
+
+R
+https://s3.amazonaws.com/udacity-hosted-downloads/ud651/DataWranglingWithR.pdf
+
+R: adjusting plots
+http://docs.ggplot2.org/current/theme.html
+
+Color hex codes
+http://www.color-hex.com/
+
+Description of the fields in the dataset
+ftp://ftp.fec.gov/FEC/Presidential_Map/2012/DATA_DICTIONARIES/CONTRIBUTOR_FORMAT.txt
+
+Election results in Missouri
+https://en.wikipedia.org/wiki/United_States_presidential_election_in_Missouri,_2012
