@@ -1,0 +1,1812 @@
+P4: Explore and Summarize Financial Contributions to 2012 Presidential Campaigns by Igor Buinyi
+========================================================
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, packages}
+rm(list=ls())
+setwd("g:/udacity/EDA_Course_Materials/project")
+library(grid)
+library(ggplot2)
+library(gridExtra)
+library(dplyr)
+library(scales)
+
+options(digits=2)
+
+# function to get a summary by groups using dplyr package
+get_summary<- function(data_groups,sorted){
+  data.summary=summarize(data_groups,
+                          n=n(),
+                          donators=n_distinct(contbr_nm),
+                          sum=sum(contb_receipt_amt),
+                          mean = mean(contb_receipt_amt),
+          median = median(contb_receipt_amt),
+          sum_per_donator=sum(contb_receipt_amt)/n_distinct(contbr_nm),
+          n_per_donator=n()/n_distinct(contbr_nm)
+          )
+  if(sorted==TRUE){
+    data.summary=data.summary[with(data.summary,order(-donators)),]
+  }
+  data.summary= as.data.frame(data.summary[,1:length(data.summary)])
+  return(data.summary)
+}
+
+#funtion to merge a summary from dplyr with a population data 
+# in such a way that all cities in MO are present
+# not only those contributors live in
+merge_with_population<- function(df_city_population0,dataset){
+  df_city_population=df_city_population0
+    
+    for (k in (2:length(dataset))){
+      #print(is.factor(dataset[,k]))
+      if(is.factor(dataset[,k])){
+        dataset[,k]=as.character(dataset[,k])
+        #print(names(dataset)[k])
+      }
+      df_city_population=cbind(df_city_population,NA)
+    }
+  dataset=dataset[c("contbr_city",
+                      names(dataset)[names(dataset)!="contbr_city"])]
+  names(df_city_population)[3:length(df_city_population)]=
+    names(dataset)[2:length(dataset)]
+    
+  df_city_population$n=0
+  df_city_population$donators=0
+  df_city_population$sum=0
+
+# find city name and get data  
+for (i in (1:length(df_city_population$contbr_city))){
+  if(df_city_population$contbr_city[i] %in% dataset$contbr_city){
+    pos=match(df_city_population$contbr_city[i],dataset$contbr_city)
+    
+    for (k in (2:length(dataset))){
+      df_city_population[i,1+k]=dataset[pos,k]
+    }
+  }
+  
+}
+
+# some city names are not matched with the population data
+# put them into the data frame with population=NA
+df_cities_population_not_known=
+  dataset[!(dataset$contbr_city %in% df_city_population$contbr_city),]
+df_cities_population_not_known$population<-NA
+ncol=length(names(df_cities_population_not_known))
+cols=names(df_city_population)
+df_cities_population_not_known<-df_cities_population_not_known[,cols]
+
+
+dataset=rbind(df_city_population,df_cities_population_not_known)
+
+return(dataset)
+}
+
+
+```
+
+### Data preprocessing and description
+
+For this project, I chose the data on contributions to 2012 Presidential campaigns funds. I am somehow involved into a political life in Ukraine, which is trying to develop democratic institutions in general and transparent political parties in particular. I would like to expand my knowledge of the international best practices in political financing, so the topic is of interest to me. I am happy to learn something about the topic during this project.
+
+In particular, I chose **Missouri (MO)** state for the analysis because I wonder about the difference between how much rural and urban areas contribute to the campaign financing. I think Missouri with its 70%/30% urban/rural population is a good choice (*Source: Table 3 in Missouri: 2010. Population and Housing Unit Counts. http://www.census.gov/prod/cen2010/cph-2-27.pdf*).
+
+
+```{r echo=FALSE, "Loading the data"}
+data <- read.csv('P00000001-MO.csv')
+data<-data[,names(data)!="X"]
+data$contb_receipt_dt<-as.Date(data$contb_receipt_dt, format="%d-%b-%y")
+
+```
+
+The csv file contains comma at the end of the line, so  I needed to add a comma at the end of the header to avoid the error in loading data (*http://stackoverflow.com/questions/8854046/duplicate-row-names-are-not-allowed-error-in-r-programming*).
+
+The summary is presented below. After reviewing the summary, I decided to:
+
+1. exclude 
+*'cmte_id'*  and *'cand_id'*  variables because they containe the same information as candidate name variable *'cand_nm'*.
+
+2. exclude *'contbr_st'* variable which is simply state code 'MO'
+
+I also transformed *'receipt_desc'* and *'memo_text'*  to strings.
+
+```{r Data summary}
+summary(data)
+data<-data[,names(data)!=c('cmte_id','cand_id','contbr_st')]
+data$receipt_desc<-as.character(data$receipt_desc)
+data$memo_text<-as.character(data$memo_text)
+str(data)
+```
+
+While doing the later analysis I discovered that:
+
+1. The dataset includes 208 transactions with zip codes outside MO. They are likely produced by input errors since many of such transactions are with zip codes from MD and MN states. (I checked that the corresponding city names from *'contbr_city'*  point to cities outside MO as well). **I decided to exclude those 208 transactions.**
+
+2. City names in *'contbr_city'* need much cleaning. For example, *ST LOIUS*, *SAINT LOUIW*  and *SAINT LUOIS*  should be replace with *SAINT LOUIS*. In total, I replaced 138 different city names in 7369 transactions (or about 10% of the dataset size).
+
+Also, I tried to recover city names from zip codes, but it is impossible to easily match zip code level data with population data from census, which I will do later. So, I used city names from cleaned *'contbr_city'* variable and did not recover city names from zip codes.
+
+I will use the 2010 census population data from *http://www.togetherweteach.com/TWTIC/uscityinfo/25mo/mopopr/25mopr.htm*  to assess how contributions differ for urban and rural areas.
+
+
+```{r echo=FALSE, "Cleaning and preprocessing data"}
+
+
+data$contbr_city<-as.character(data$contbr_city)
+data$contbr_employer<-as.character(data$contbr_employer)
+data$contbr_occupation<-as.character(data$contbr_occupation)
+data$election_tp<-as.character(data$election_tp)
+#read file city names for correction
+df_city_names <- read.csv('replace_city_names.csv', as.is=TRUE)
+df_employers <- read.csv('replace_employers.csv', as.is=TRUE)
+
+#remove 208 transactions with incorrect zip codes
+data$contbr_zip<-as.character(data$contbr_zip)
+table(substring(as.character(data$contbr_zip),1,2))
+print(paste("Drop ", dim(data[!substring(as.character(data$contbr_zip),1,2) %in% c("63","64","65"),])[1], 
+            " trancastions with incorrect zip code",sep=""))
+data<-data[substring(as.character(data$contbr_zip),1,2) %in% 
+             c("63","64","65"),]
+#clean remaining zip codes: keep only first 5 characters
+data$contbr_zip<-as.integer(substring(as.character(data$contbr_zip),1,5))
+
+
+print(paste("Drop ", 
+            sum(data$contb_receipt_dt>='2012-11-06'),
+            "transactions after the Election Date (Nov 6, 2012)"))
+data<-data[!(data$contb_receipt_dt>='2012-11-06'),]
+
+print(paste("Drop ", sum(data$contb_receipt_amt==0),
+            "transactions with zero amount"))
+data<-data[!data$contb_receipt_amt==0,]
+
+
+df_city_population <- read.csv('MO_population.csv', as.is=TRUE)
+head(df_city_population,10)
+
+#replace mistakes in city names
+cnt_cityname=0
+cnt_empl=0
+data$party<-NA
+data$population<-NA
+
+for (i in (1:length(data[[1]]))){
+  if(data$contbr_city[i] %in% df_city_names$found_name){
+    pos=match(data$contbr_city[i],df_city_names$found_name)
+    data$contbr_city[i]<-df_city_names$correct_name[pos]
+    cnt_cityname=cnt_cityname+1
+  }
+  if(data$contbr_employer[i] %in% df_employers$found_name){
+    pos=match(data$contbr_employer[i],df_employers$found_name)
+    data$contbr_employer[i]<-df_employers$correct_name[pos]
+    cnt_empl=cnt_empl+1
+  }
+  
+  if(data$contbr_occupation[i] %in% 
+       c("INFORMATION REQUESTED PER BEST EFFORTS")){
+    data$contbr_occupation[i]<-"INFO REQ. PER BEST EFF."
+    #cnt_empl=cnt_empl+1
+  }
+
+if(data$contbr_employer[i] %in% 
+     c("INFORMATION REQUESTED PER BEST EFFORTS")){
+    data$contbr_employer[i]<-"INFO REQ. PER BEST EFF."
+    #cnt_empl=cnt_empl+1
+  }
+
+  if(data$election_tp[i] %in% c("P2102","P")){
+    data$election_tp[i]<-"P2012"
+    #cnt_empl=cnt_empl+1
+  }
+
+  if(data$cand_nm[i] == "Obama, Barack"){
+    data$party[i]<-"Democratic"
+  } else if (data$cand_nm[i] == "Johnson, Gary Earl"){
+    data$party[i]<-"Libertarian"
+  } else if (data$cand_nm[i] == "Stein, Jill"){
+    data$party[i]<-"Green"
+  } else {
+    data$party[i]<-"Republican"
+  }
+  
+  
+  if(data$contbr_city[i] %in% df_city_population$contbr_city){
+    pos=match(data$contbr_city[i],df_city_population$contbr_city)
+    data$population[i]<-df_city_population$population[pos]
+ 
+  }
+  
+#  if(i %% 5000==0){print(i)}
+  
+}
+print(paste(cnt_cityname, "city names corrected"))
+print(paste(cnt_empl, "employer names corrected"))
+
+
+print(paste("There are ", length(data$contbr_city), 
+            " transactions in the dataset",sep=""))
+print(paste(length(unique(data$contbr_nm)), " unique donators",sep=""))
+
+```
+
+
+Univariate Plots Section
+------------------------------------------
+
+
+### By transaction amount
+```{r echo=FALSE, warning=FALSE, "By transaction amount"}
+plot1010<-ggplot(aes(x=contb_receipt_amt), data=data)+
+  geom_histogram(binwidth=100)+
+  scale_x_continuous(breaks=seq(-5000,5000,1000), 
+                     limits = c(-5500, 5500) )+
+  ggtitle('Number of transactions')
+
+
+data.by_amount=get_summary(
+  group_by(data,100*round(data$contb_receipt_amt/100)),
+  sorted=FALSE)
+names(data.by_amount)[1]='contb_receipt_amt'
+
+plot1011<-ggplot(aes(x=contb_receipt_amt, y=sum), data=data.by_amount)+
+  geom_bar(stat="identity")+
+  scale_x_continuous(breaks=seq(-5000,5000,1000), 
+                     limits = c(-5500, 5500) )+
+  ggtitle('Sum of donations, $')
+grid.arrange(plot1010,plot1011, ncol=1)
+rm(data.by_amount)
+
+print(paste("The total sum of contributions: ", 
+            sum(data$contb_receipt_amt), " USD",sep=""))
+print(paste("Number of positive amount transactions: ", 
+            length(data$contb_receipt_amt[data$contb_receipt_amt>0]),sep=""))
+print(paste("Sum of positive amount transactions: ", 
+            sum(data$contb_receipt_amt[data$contb_receipt_amt>0]), 
+            "USD",sep=""))
+print(paste("Number of negative amount transactions: ", 
+            length(data$contb_receipt_amt[data$contb_receipt_amt<0]),sep=""))
+print(paste("Sum of negative amount transactions: ", 
+            sum(data$contb_receipt_amt[data$contb_receipt_amt<0]), 
+            "USD",sep=""))
+
+
+
+print("Positive amount receipts")
+summary(data$contb_receipt_amt[data$contb_receipt_amt>=0])
+sum(data$contb_receipt_amt[data$contb_receipt_amt>=0])
+print("Negative amount receipts")
+summary(data$contb_receipt_amt[data$contb_receipt_amt<0])
+sum(data$contb_receipt_amt[data$contb_receipt_amt<0])
+```
+
+The major part of transactions are between $1 and $500
+Some of the transactions are with negative amount. The sum of negative transactions is about 3% of the total contributions.  Let's study a bit more why the negative transactions occur. The information can be accessed in  *'receipt_desc'* variable. If it is empty, I will use the description from *'memo_text'* variable.  
+
+```{r echo=FALSE}
+data$reason<-ifelse(data$receipt_desc=="",data$memo_text,data$receipt_desc)
+data.negative<-data[data$contb_receipt_amt<0,]
+
+data.negative.by_reason<-
+  get_summary(group_by(data.negative,reason),
+              sorted=TRUE)
+data.negative.by_reason
+
+```
+So, the major reasons for negative transactions are *"Refund"* and *"REDESIGNATION TO GENERAL"*. They are obviously netted with the corresponding positive amount transactions, so we can easily calculate the correct sum of donations by simply adding all, positive and negative, transactions. 
+
+However, to analyze transaction-level data, it would be a wise idea to clear both positive and negative transactions. Unfortunately, this cannot be done in a straightforward way at transaction level because it is not possible to identify the original positive transaction for each negative transaction. The example is given below:
+
+```{r echo=FALSE}
+
+cols=c("cand_nm","contbr_nm","contb_receipt_dt",
+       "contb_receipt_amt","receipt_desc","memo_text",
+       "tran_id","election_tp")
+data[data$contbr_nm=='DUNLAP, JEAN E.',names(data) %in% cols]
+data[data$contbr_nm=='BRADY, GEORGIA',names(data) %in% cols]
+```
+
+Mr. JEAN E. DUNLAP refunded $870 on 2012-06-23, but it is impossible to identify when he donated the money before the refund date. We can see a donation of only $50 on 2012-06-19. Similarly, Mrs. GEORGIA BRADY refunded $90 on 2012-10-12, which cannot be a compound of some of her prior donations. 
+
+That is why it is not possible to match the original positive transactions to negative transactions. Therefore, **for some part of the analysis I will ignore all transactions of nonpositive value**. Specifically, when analysing contributions by time of transactions I will ignore nonpositive transactions, unless otherwise noted. I believe, that such an approach is capable of capturing the major facts hidden in the data and will not lead to errors in our conclusions.
+
+
+### By time of transaction
+```{r echo=FALSE,warning=FALSE, Plots_by_time}
+data.positive=subset(data,data$contb_receipt_amt>0)
+
+
+     
+plot0101<-ggplot(aes(x=contb_receipt_dt), data=data.positive)+
+  geom_histogram(binwidth=7,fill=I('#F79420'),
+                 color=I('black'),size=0.1)+
+  xlab("Weekly time bucket")+
+  theme(axis.title.y=element_blank(),
+        axis.text.x= element_text(angle = 90))+
+  scale_y_continuous(limits=c(0,7500))+
+  ggtitle('Number of transactions')
+plot0102<-data.positive %>%
+  group_by(contb_receipt_dt=
+             contb_receipt_dt-as.numeric(format(contb_receipt_dt, "%w"))) %>%
+  get_summary(sorted=FALSE) %>%
+  ggplot(aes(x=contb_receipt_dt, y=donators)) +
+  geom_bar(stat="identity", fill=I('#eed5b7'), color="black",size=0.1) +
+  xlab("Weekly time bucket")+
+  scale_y_continuous(limits=c(0,7500))+
+  theme(axis.title.y=element_blank(),axis.text.x= element_text(angle = 90))+
+  ggtitle("Number of donators")
+plot0103<-ggplot(
+  aes(x=contb_receipt_dt - as.numeric(format(contb_receipt_dt, "%w")), 
+           y=contb_receipt_amt), data=data.positive)+
+  geom_bar(stat="identity",fill=I('#eb9180'))+
+  xlab("Weekly time bucket")+
+  theme(axis.title.y=element_blank(),axis.text.x= element_text(angle = 90))+
+  ggtitle('Sum of transactions')
+
+grid.arrange(plot0101,plot0102,plot0103, ncol=3,
+             top="Positive amount transactions over time")
+
+plot0111<-ggplot(aes(x=contb_receipt_dt), data=data.negative)+
+  geom_histogram(binwidth=7,fill=I('#F79420'),color=I('black'),size=0.1)+
+  xlab("Weekly time bucket")+
+  scale_y_continuous(limits=c(0,60))+
+  theme(axis.title.y=element_blank(),axis.text.x= element_text(angle = 90))+
+  ggtitle('Number of transactions')
+plot0112<-data.negative %>%
+  group_by(
+    contb_receipt_dt=
+      contb_receipt_dt - as.numeric(format(contb_receipt_dt, "%w"))) %>%
+  get_summary(sorted=FALSE) %>%
+  ggplot(aes(x=contb_receipt_dt, y=donators)) +
+  geom_bar(stat="identity", fill=I('#eed5b7'), color="black",size=0.1) +
+  xlab("Weekly time bucket")+
+  scale_y_continuous(limits=c(0,60))+
+  theme(axis.title.y=element_blank(),axis.text.x= element_text(angle = 90))+
+  ggtitle("Number of donators")
+plot0113<-ggplot(
+  aes(x=contb_receipt_dt - as.numeric(format(contb_receipt_dt, "%w")), 
+      y=contb_receipt_amt), data=data.negative)+
+  geom_bar(stat="identity",fill=I('#eb9180'))+
+  theme(axis.title.y=element_blank(),axis.text.x= element_text(angle = 90))+
+  xlab("Weekly time bucket")+
+  ggtitle('Sum of transactions')
+grid.arrange(plot0111,plot0112,plot0113, ncol=3,
+             top="Negative amount transactions over time")
+
+```
+
+In September-October 2012 the contributions to reach the maximum level ~4000 donators per week and ~$1M per week.
+
+
+### By contributor
+
+```{r echo=FALSE}
+###sort(table(data$cand_nm),decreasing = TRUE)      
+print(paste(length(unique(data$contbr_nm)), 
+            " unique donators in the dataset",sep=""))
+data %>%
+group_by(contbr_nm) %>%
+get_summary(sorted=FALSE) %>%
+dplyr::select(sum_per_donator) %>%
+summary()
+
+```
+
+
+### By candidate
+Missouri held Republican primaries in 2012, so there are a number of Republican candidates in the dataset. In datasets for the majority of the other states, the number of unique candidates will be much smaller.
+
+In our dataset, **Barack Obama** represents Democratic Party,
+**Gary Earl Johnson** - Libertarian Party,
+**Jill Stein** - Green Party, and the others are from Republican Party.
+I also created a new variable *party* to study Republican candidates as one group when I need to do so.
+
+
+```{r echo=FALSE, Candidate_Plots}
+###sort(table(data$cand_nm),decreasing = TRUE)      
+
+data.by_cand<-get_summary(group_by(data,cand_nm),
+                          sorted=TRUE)
+data.by_cand
+
+data.by_party<-get_summary(group_by(data,party),
+                          sorted=TRUE)
+data.by_party
+
+
+
+```
+The major part of contributions was allocated to finalists Barack Obama and Mitt Romney. The number of transactions to Obama's campaign was twice as large as to Romney's, but they, on average, were a few times lower (medians are $37 vs. $125).
+
+The average amount per one donator is $475 for Obama and $1768 for Romney. It appears that Obama and Romney pursued very different fundraising strategies.
+
+
+
+
+### By City
+```{r echo=FALSE, "By city1"}
+print(paste("There are ", length(unique(data$contbr_city)), 
+            " cities in the dataset",sep=""))
+print(paste("There are ", 
+            length(unique(df_city_population$contbr_city)), 
+            " cities in Missouri",sep=""))
+
+data.by_city<-get_summary(group_by(data,contbr_city),
+                          sorted=FALSE)
+#get a dataset with all cities in MO, not only those whose inhabitants contributed to the election funds
+data.by_city<-merge_with_population(df_city_population,data.by_city)
+head(data.by_city,10)
+
+data.by_city$contbr_city<-
+  factor(data.by_city$contbr_city,
+         levels= as.character(data.by_city$contbr_city))
+data$contbr_city<-
+  factor(data$contbr_city, 
+         levels= as.character(data.by_city$contbr_city))
+
+print(paste(
+  "Top20 cities (by population): ",
+  format(100*sum(data.by_city$population[1:20])/
+           sum(df_city_population$population),1), 
+  "% of population",sep=""))
+print(paste(
+  "", format(100*sum(data.by_city$donators[1:20])/
+               sum(data.by_city$donators),1), 
+  "% of all contributors",sep=""))
+print(paste("and ", format(100*sum(data.by_city$sum[1:20])/
+                             sum(data$contb_receipt_amt),1), 
+            "% of total sum contributed",sep=""))
+
+```
+
+To cover all cities in the dataset, I make a few groups by city population. Kansas City and Saint Louis will be in separate groups, Springfield, Independence and Columbia are bundled together in group *100k-300k* and so on. I did not match 115 cities in the dataset to population data, but they correspond only to 2% of donators and total sum of contributions in the dataset. 
+
+```{r echo=FALSE}
+### cities by population
+city_population_buckets<-c(0,1000,5000,10000,20000,
+                           50000,100000,300000,400000,500000)
+df_population_groups<-data.by_city%>%
+  cbind(pop_grp=cut(data.by_city$population, 
+                    breaks = city_population_buckets)) %>%
+  group_by(pop_grp) %>%
+  summarize(ncities=n(),
+            totalpopulation=sum(population,na.rm=TRUE),
+            donators=sum(donators),
+            sum=sum(sum)
+          )
+df_population_groups
+```
+
+
+
+### By Employer
+```{r echo=FALSE, "By employer1"}
+data.by_employer<-get_summary(group_by(data,contbr_employer),
+                          sorted=TRUE)
+data.by_employer$contbr_employer<-
+  factor(data.by_employer$contbr_employer, 
+         levels= as.character(data.by_employer$contbr_employer))
+data$contbr_employer<-
+  factor(data$contbr_employer,
+         levels= as.character(data.by_employer$contbr_employer))
+
+head(data.by_employer,15)
+print(paste("Number of unique employers: ", 
+            length(unique(data$contbr_employer)),sep=""))
+print(paste("Top20 employers (by number of transactions): ", 
+            format(100*sum(data.by_employer$donators[1:20])/
+                     sum(data.by_employer$donators),1), 
+            "% of all contributors",sep=""))
+print(paste("and ", format(100*sum(data.by_employer$sum[1:20])/
+                             sum(data$contb_receipt_amt),1), 
+            "% of total sum contributed",sep=""))
+
+
+```
+
+
+
+
+### By Occupation
+```{r echo=FALSE, "By occupation"}
+data.by_occupation<-get_summary(group_by(data,contbr_occupation),
+                          sorted=TRUE)
+head(data.by_occupation,10)
+
+data.by_occupation$contbr_occupation<-
+  factor(data.by_occupation$contbr_occupation, 
+         levels= data.by_occupation$contbr_occupation)
+data$contbr_occupation<-
+  factor(data$contbr_occupation, 
+         levels= data.by_occupation$contbr_occupation)
+print(paste("Number of unique occupations: ", 
+            length(unique(data$contbr_occupation)),sep=""))
+print(paste("Top20 occupations (by number of transactions): ", 
+            format(100*sum(data.by_occupation$donators[1:20])/
+                     sum(data.by_occupation$donators),1), 
+            "% of all contributors",sep=""))
+print(paste("and ", format(100*sum(data.by_occupation$sum[1:20])/
+                             sum(data$contb_receipt_amt),1), 
+            "% of total sum contributed",sep=""))
+
+```
+
+
+
+### By form type
+```{r echo=FALSE, "Form type1"}
+data.positive.by_form_tp<-get_summary(group_by(data.positive,form_tp),
+                          sorted=TRUE)
+head(data.positive.by_form_tp)
+```
+
+### By election type
+```{r echo=FALSE, "Election type1"}
+data.positive.by_election_tp<-get_summary(group_by(data.positive,election_tp),
+                          sorted=TRUE)
+head(data.positive.by_election_tp)
+
+```
+
+
+# Univariate Analysis
+
+### What is the structure of your dataset?
+
+There were 78504 transactions in the downloaded dataset. 
+They include information about contributor (name, city, zip code, occupation, employer), transaction characteristics (amount, time) and some information at the receiver side (candidate name, election type, form type, descriptions). 
+
+There were Republican primaries in Missouri, so I added a party variable to do some analysis at the party level.
+
+Contributions to election funds intensified before the election date. 60% of the total amount was contributed during the  last 4 months before the Election Date.
+
+The median transaction size is only $50, but people typically made 4-5 donations over the campaign period, so the median contribution to the campaign is $350 and mean contribution is close to $1,000.
+
+The major part (93% of the total amount) of contributions went to the finalists Barack Obama and Mitt Romney. Therefore, this report will largely be a comparison of their fundraising results. It is now clear that they pursued very different fundraising strategies. Obama got many and small contributions while Romney received few and large donations. The total amount is $4.4M for Obama and $11.4M for Romney.
+
+### What is/are the main feature(s) of interest in your dataset?
+The two main feature are to measure the result of fundraising campaign: one is the **amount of receipt** and the other (implicitly present) is the  
+**count** of transactions or donators.
+
+The most important determinant feature is **candidate name**. 
+
+### What other features in the dataset do you think will help support your investigation into your feature(s) of interest?
+Basically, the following analysis is about how the interplay between candidate and the number and amount of contributions is affected by the other variables. I am interested in the fundraising campaign results in different cities, over different occupations and over time.
+
+
+
+### Did you create any new variables from existing variables in the dataset?
+Yes, I created variable *party* from candidate name. Moreover, I used the data from outside the dataset. I loaded the population of cities in Missouri from *http://www.togetherweteach.com/TWTIC/uscityinfo/25mo/mopopr/25mopr.htm* in order to investigate campaign results in rural vs. urban areas.
+
+### Of the features you investigated, were there any unusual distributions? Did you perform any operations on the data to tidy, adjust, or change the form of the data? If so, why did you do this?
+
+I excluded 208 transactions with zip codes outside Missouri, 
+451 transactions after the Election Date (Nov 6, 2012),
+and then 61 transactions of zero amount. The resulting dataset consists of 77784 transactions, including 500 with negative amount (they are refunds or retransfers).
+
+In order to analyze the data by cities I corrected 7369 city names and added city population from the other dataset. In addition, I cleaned employer names and election types.
+
+The reasons for this:
+1. For this analysis I am interested in the fundraising campaigns in Missouri, not the other states.
+2. Transactions after the election date are not likely to be representative.
+3. Transactions of zero amount either are errors or have no value for the analysis.
+
+I would also like to match negative (refunds or retransfers) and positive transactions at transaction level and adjust them. However, this is not possible for this dataset. So, I will use only positive transaction for analysis of contributions over time.
+
+I had to clean city and employer names to avoid bias in my conclusions. Few errors in the campaign type variable are corrected just to make the dataset cleaner.
+
+It should be noted, that I assume the names of contributors to be correct (in other words, different values of *contbr_nm* variable correspond to different persons). This is not likely to be a correct assumption given the high number of errors in some other variables, but anyway we do not have a gold standard data for names in the dataset to correct them.
+
+
+# Bivariate Plots Section
+
+
+
+
+
+```{r echo=FALSE, warning=FALSE, Bivariate_Plots}
+# by time of transactions
+
+### time vs. type of election
+plot2011<-ggplot(
+  aes(x=contb_receipt_dt - as.numeric(format(contb_receipt_dt, "%w")), 
+      fill=election_tp),
+  data=data.positive[with(data.positive,order(election_tp)),])+
+  geom_bar(stat="bin",binwidth=7, color="black",size=0.2)+
+  theme(axis.title.y=element_blank(),
+        axis.text.x=element_text(size = rel(0.7)))+
+  ggtitle("Number of contributions")+
+  xlab("Weekly time bucket")+
+  theme( legend.position=c(0.2,0.7))
+  
+
+
+plot2012<-data.positive %>%
+  group_by(
+    election_tp,
+    contb_receipt_dt=
+      contb_receipt_dt - as.numeric(format(contb_receipt_dt, "%w"))) %>%
+  get_summary(sorted=FALSE) %>%
+  ggplot(aes(x=contb_receipt_dt, y=sum, fill=election_tp)) +
+  geom_bar(stat="identity", color="black",size=0.2) +
+  xlab("Weekly time bucket")+
+  theme(axis.title.y=element_blank(),
+        axis.text.x=element_text(size = rel(0.7)))+
+  ggtitle("Sum of contributions")+
+  theme( legend.position=c(0.2,0.7))
+
+grid.arrange(plot2011, plot2012, ncol=2, top="Election type vs. time")
+
+
+
+### time vs. form type
+plot2011<-ggplot(
+  aes(x=contb_receipt_dt - as.numeric(format(contb_receipt_dt, "%w")), 
+      fill=form_tp),
+  data=data.positive[with(data.positive,order(form_tp)),])+
+  geom_bar(stat="bin",binwidth=7, color="black",size=0.2)+
+  theme(axis.title.y=element_blank())+
+  ggtitle("Number of contributions")+
+  xlab("Weekly time bucket")+
+  theme( legend.position=c(0.2,0.7),
+         axis.text.x=element_text(size = rel(0.7)))
+plot2012<-data.positive %>%
+  group_by(
+    form_tp,
+    contb_receipt_dt=
+      contb_receipt_dt - as.numeric(format(contb_receipt_dt, "%w"))) %>%
+  get_summary(sorted=FALSE) %>%
+  ggplot(aes(x=contb_receipt_dt, y=n, fill=form_tp)) +
+  geom_bar(stat="identity", color="black",size=0.2) +
+  xlab("Weekly time bucket")+
+  theme(axis.title.y=element_blank())+
+  ggtitle("Sum of contributions")+
+  theme( legend.position=c(0.2,0.7),
+         axis.text.x=element_text(size = rel(0.7)))
+grid.arrange(plot2011, plot2012, ncol=2, top="Form type vs. time")
+
+
+
+## size of transaction vs form type
+plot2111<-data %>%
+  group_by(form_tp,
+           contb_receipt_amt=50*round(contb_receipt_amt/50)) %>%
+  get_summary(sorted=FALSE) %>%
+  ggplot(aes(x=contb_receipt_amt, y=n, fill=form_tp))+
+  geom_bar(stat="identity",color='black',size=0.2)+
+  guides(fill=guide_legend(nrow=1))+
+  scale_x_continuous(breaks=seq(0,5000,1000), limits = c(0, 5500) )+
+  ggtitle('Number of transactions')+
+  theme( legend.position="top",axis.title.x=element_blank())
+plot2112<- data %>%
+  group_by(form_tp,contb_receipt_amt=50*round(contb_receipt_amt/50)) %>%
+  get_summary(sorted=FALSE) %>%
+  ggplot(aes(x=contb_receipt_amt, y=sum, fill=form_tp))+
+  guides(fill=guide_legend(nrow=2))+
+  geom_bar(stat="identity",color='black',size=0.2)+
+  scale_x_continuous(breaks=seq(0,5000,1000), limits = c(0, 5500) )+
+  ggtitle('Amount of contributions, $')+
+  theme(legend.position="none",axis.title.x=element_blank())
+grid.arrange(plot2111+
+               theme(plot.title = element_text(size = rel(0.8)),
+                     legend.key.size=unit(0.4,"cm"),
+                     legend.text=element_text(size = rel(0.8)),
+                     plot.margin=unit(c(0.5,0.5,-0.15,0.5), "cm")),
+             plot2112+
+               theme(plot.title = element_text(size = rel(0.8)),
+                     plot.margin=unit(c(-0.15,0.5,0.5,0.5), "cm")),
+             ncol=1, top="Amount of transaction vs. form type",
+             heights=c(0.55,0.45))
+
+
+
+
+
+### time vs. candidate
+plot2021<-ggplot(
+  aes(x=contb_receipt_dt - as.numeric(format(contb_receipt_dt, "%w")), 
+      fill=cand_nm),
+  data=data.positive[with(data.positive,order(cand_nm)),])+
+  geom_bar(stat="bin",binwidth=7,color=I('black'),size=0.2)+
+  guides(fill=guide_legend(nrow=3))+
+  theme(axis.title.x=element_blank(),
+        axis.title.y=element_blank(),
+        legend.position="top")+
+  ggtitle("Number of contributions")+
+  scale_x_date()
+
+plot2022<-data.positive %>%
+  group_by(
+    cand_nm,
+    contb_receipt_dt=
+      contb_receipt_dt - as.numeric(format(contb_receipt_dt, "%w"))) %>%
+  get_summary(sorted=FALSE) %>%
+  ggplot(aes(x=contb_receipt_dt, y=sum, fill=cand_nm)) +
+  geom_bar(stat="identity", color="black", size=0.2,,show_guide = FALSE  )+
+  xlab("Weekly time bucket")+
+  theme(axis.title.y=element_blank())+
+  ggtitle("Sum of contributions")
+
+grid.arrange(plot2021 +
+               theme(plot.title = element_text(size = rel(0.8)),
+                     plot.margin=unit(c(0.5,0.5,-0.15,0.5), "cm"),
+                     legend.key.size=unit(0.4,"cm"),
+                     legend.text=element_text(size = rel(0.8))), 
+             plot2022+
+               theme(plot.title = element_text(size = rel(0.8)),
+                     plot.margin=unit(c(-0.15,0.5,0.5,0.5), "cm")), 
+             ncol=1, 
+             top="Candidate vs. time on single graph",
+             heights=c(0.55,0.45))
+
+grid.arrange(plot2021+
+               scale_x_date(
+                 limits = c(as.Date('2011-03-01'),
+                            as.Date('2012-05-01')))+
+               theme(plot.title = element_text(size = rel(0.8)),
+                     plot.margin=unit(c(0.5,0.5,-0.15,0.5), "cm"),
+                     legend.key.size=unit(0.4,"cm")), 
+             plot2022+
+               scale_x_date(limits = c(as.Date('2011-03-01'),
+                                       as.Date('2012-05-01')))+
+               scale_y_continuous(limits = c(0,400000))+
+               theme(plot.title = element_text(size = rel(0.8)))+
+               theme(plot.margin=unit(c(-0.15,0.5,0.5,0.5), "cm")), 
+             ncol=1,
+             top="Candidate vs. time on single graph (until May'2015)",
+             heights=c(0.55,0.45))
+
+```
+
+Please see facet wrap plots in the next section (Multivariate plots). 
+
+
+```{r echo=FALSE, warning=FALSE, Bivariate_Plots2}
+
+### Amount of transaction vs. candidate
+plot2101<-data %>%
+  subset(cand_nm %in% 
+           c("Obama, Barack","Romney, Mitt", 
+             "Paul, Ron", "Santorum, Rick")) %>%
+  group_by(cand_nm,contb_receipt_amt=50*round(contb_receipt_amt/50)) %>%
+  get_summary(sorted=FALSE) %>%
+  ggplot(aes(x=contb_receipt_amt, y=n, fill=cand_nm))+
+  geom_bar(stat="identity",color='black',size=0.2)+
+  guides(fill=guide_legend(nrow=1))+
+  scale_x_continuous(breaks=seq(0,5000,1000), limits = c(0, 5500) )+
+  ggtitle('Number of transactions')+
+  theme( legend.position="top",axis.title.x=element_blank())
+plot2102<- data %>%
+  subset(cand_nm %in% c("Obama, Barack","Romney, Mitt", 
+                        "Paul, Ron", "Santorum, Rick")) %>%
+  group_by(cand_nm,contb_receipt_amt=50*round(contb_receipt_amt/50)) %>%
+  get_summary(sorted=FALSE) %>%
+  ggplot(aes(x=contb_receipt_amt, y=sum, fill=cand_nm))+
+  guides(fill=guide_legend(nrow=2))+
+  geom_bar(stat="identity",color='black',size=0.2)+
+  scale_x_continuous(breaks=seq(0,5000,1000), limits = c(0, 5500) )+
+  ggtitle('Amount of contributions, $')+
+  theme(legend.position="none",axis.title.x=element_blank())
+grid.arrange(plot2101+
+               theme(plot.title = element_text(size = rel(0.8)),
+                     legend.key.size=unit(0.4,"cm"),
+                     legend.text=element_text(size = rel(0.8)),
+                     plot.margin=unit(c(0.5,0.5,-0.15,0.5), "cm")),
+             plot2102+
+               theme(plot.title = element_text(size = rel(0.8)),
+                     plot.margin=unit(c(-0.15,0.5,0.5,0.5), "cm")), 
+             ncol=1, top="Transaction by amount vs. candidate",
+             heights=c(0.55,0.45))
+
+
+
+plot2201<-data %>%
+  subset(cand_nm %in% c("Obama, Barack","Romney, Mitt")) %>%
+  group_by(cand_nm, contbr_nm) %>%
+  get_summary(sorted=FALSE) %>%
+  group_by(cand_nm, donated_amt=100*round(sum_per_donator/100)) %>%
+  summarize(donators=n(),
+            sum=sum(sum_per_donator),
+            mean = mean(sum_per_donator),
+          median = median(sum_per_donator)
+          ) %>%
+  ggplot(aes(x=donated_amt, y=donators, fill=cand_nm))+
+  geom_bar(stat="identity",color='black',size=0.2)+
+  guides(fill=guide_legend(nrow=1))+
+  scale_x_continuous(breaks=seq(0,10000,2000), limits = c(0, 10500) )+
+  ggtitle('Number of donators')+
+  theme( legend.position="top",axis.title.x=element_blank(),
+         axis.text=element_text(size = rel(0.8)),
+         plot.title=element_text(size = rel(1.2)))+
+  facet_wrap(~cand_nm)
+plot2202<- data %>%
+  subset(cand_nm %in% c("Obama, Barack","Romney, Mitt")) %>%
+  group_by(cand_nm, contbr_nm) %>%
+  get_summary(sorted=FALSE) %>%
+  group_by(cand_nm, donated_amt=100*round(sum_per_donator/100)) %>%
+  summarize(donators=n(),
+            sum=sum(sum_per_donator),
+            mean = mean(sum_per_donator),
+          median = median(sum_per_donator)
+          ) %>%
+  ggplot(aes(x=donated_amt, y=sum, fill=cand_nm))+
+  geom_bar(stat="identity",color='black',size=0.2)+
+  guides(fill=guide_legend(nrow=1))+
+  scale_x_continuous(breaks=seq(0,10000,2000), limits = c(0, 10500) )+
+  ggtitle('Amount of donations')+
+  xlab("Transaction size bucket")+
+  theme( legend.position="none", 
+         axis.text=element_text(size = rel(0.8)),
+         axis.title.x=element_text(size = rel(0.7)),
+         plot.title=element_text(size = rel(1.2)))+
+  facet_wrap(~cand_nm,scales="free_y")
+
+  
+grid.arrange(plot2201+theme(plot.title = element_text(size = rel(0.8)))+
+               theme(legend.key.size=unit(0.4,"cm"),
+                     legend.text=element_text(size = rel(0.8)))+
+               theme(plot.margin=unit(c(0.5,0.5,-0.15,0.5), "cm")),
+             plot2202+theme(plot.title = element_text(size = rel(0.8)))+
+               theme(plot.margin=unit(c(-0.15,0.5,0.5,0.5), "cm")), 
+             ncol=1, top="Donated amount per contributor vs. candidate",
+             heights=c(0.55,0.45))
+
+
+data.by_candidate_and_donator=data %>%
+  subset(cand_nm %in% c("Obama, Barack","Romney, Mitt")) %>%
+  group_by(cand_nm, contbr_nm) %>%
+  get_summary(sorted=FALSE) 
+
+print(paste(
+  "$",sum(data.by_candidate_and_donator$sum[
+    data.by_candidate_and_donator$cand_nm=="Obama, Barack"]),
+  " donated to Obama's fund",sep=""))
+print(paste(
+  "   including $", 
+  sum(data.by_candidate_and_donator$sum[
+    data.by_candidate_and_donator$cand_nm=="Obama, Barack" &
+      data.by_candidate_and_donator$sum>0 &
+      data.by_candidate_and_donator$sum<=1500]),
+  " (or ", round(100*sum(data.by_candidate_and_donator$sum[
+    data.by_candidate_and_donator$cand_nm=="Obama, Barack" &
+      data.by_candidate_and_donator$sum>0 &
+      data.by_candidate_and_donator$sum<=1500])/
+      sum(data.by_candidate_and_donator$sum[
+        data.by_candidate_and_donator$cand_nm=="Obama, Barack"])), 
+  "%) from those who donated up to $1500",sep=""))     
+
+print(paste("$", 
+            sum(data.by_candidate_and_donator$sum[
+              data.by_candidate_and_donator$cand_nm=="Romney, Mitt"]),
+            " donated to Romney's fund",sep=""))
+print(paste("   including $", 
+            sum(data.by_candidate_and_donator$sum[
+              data.by_candidate_and_donator$cand_nm=="Romney, Mitt" &
+                data.by_candidate_and_donator$sum>0 &
+                data.by_candidate_and_donator$sum<=1500]),
+            " (or ", round(100*sum(data.by_candidate_and_donator$sum[
+              data.by_candidate_and_donator$cand_nm=="Romney, Mitt" &
+                data.by_candidate_and_donator$sum>0 &
+                data.by_candidate_and_donator$sum<=1500])/
+                sum(data.by_candidate_and_donator$sum[
+                  data.by_candidate_and_donator$cand_nm=="Romney, Mitt"])), 
+            "%) from those who donated up to $1500",sep="")) 
+
+```
+
+It is clear that Obama received more small transactions, but Romney outperformed him in big transactions.
+Receipts of $2500 contributed more than $6M to the campaigns, and the major part of these transactions went to Romney's campaign. Transactions of $5000 almost exclusively went Romney's campaign, but they were not as popular as $2500 transactions.
+
+
+```{r echo=FALSE, warning=FALSE, Bivariate_Plots3}
+
+# Average weekly donation per contributor over time
+# Romney ~$1000, Obama,Paul and Santorum close to $100
+data.positive %>%
+  group_by(
+    cand_nm,
+    contb_receipt_dt=
+      contb_receipt_dt - as.numeric(format(contb_receipt_dt, "%w"))) %>%
+  get_summary(sorted=FALSE) %>%
+  subset(cand_nm %in% c("Obama, Barack","Romney, Mitt", 
+                        "Paul, Ron", "Santorum, Rick")) %>%
+  ggplot(aes(x=contb_receipt_dt, y=sum_per_donator, color=cand_nm)) +
+  geom_line(stat="identity", size=0.8) +
+  theme(axis.title.y=element_blank())+
+  scale_y_log10()+
+  ggtitle("Average sum per donator per week")+
+  xlab("Weekly time bucket")
+
+```
+
+It is remarkable, that the Romney's campaign stands out from the campaigns of the other Republican candidates.
+The average weekly donation per contributor is very close for Obama, Paul and Santorum (~$200 in 2011 and ~$100 in 2012), but the number for Romney was up to 10 times higher.
+
+
+
+```{r echo=FALSE, warning=FALSE, Bivariate_Plots4}
+nn=1
+NN=30
+
+plot2041<-ggplot(aes(x=contbr_city,y=population),
+       data=data.by_city[nn:NN,])+
+  geom_bar(stat="identity",fill=I('#7d9180'))+ 
+  theme(axis.title.y=element_blank(),
+        axis.title.x=element_blank(),
+        plot.title = element_text(size = rel(0.7)))+
+  coord_flip()+
+  #scale_y_log10()+
+  ggtitle('Population')
+
+plot2042<-ggplot(aes(x=contbr_city,y=n),
+       data=data.by_city[nn:NN,])+
+  geom_bar(stat="identity",fill=I('#7d9180'))+ 
+  geom_point(stat="identity",fill=I('#7d9180'),aes(y=donators))+ 
+  theme(axis.title.y=element_blank(),
+        axis.title.x=element_blank(),
+        plot.title = element_text(size = rel(0.7)))+
+  coord_flip()+
+  #scale_y_log10()+
+  ggtitle('#contributors (dot) and #transactions')+
+  theme(legend.position="top")+
+  theme(plot.title = element_text(size = rel(0.7)))+
+  guides(color="none")
+
+
+plot2043<-ggplot(aes(x=contbr_city,y=sum),
+       data=data.by_city[nn:NN,])+
+  geom_bar(stat="identity",fill=I('#eb9180'))+ 
+  theme(axis.text.y=element_blank(),
+        axis.title.y=element_blank(),
+        axis.title.x=element_blank(),
+        plot.title = element_text(size = rel(0.7)))+
+  coord_flip()+
+  #scale_y_log10(limits=c(1000,10000000))+
+  ggtitle('Total amount of donations, $')
+
+
+plot2044<-ggplot(aes(x=contbr_city,y=sum_per_donator),
+       data=data.by_city[nn:NN,])+
+  geom_bar(stat="identity",fill=I('#1daa80'))+ 
+  theme(axis.title.x=element_blank(),
+        axis.title.y=element_blank(),
+        plot.title = element_text(size = rel(0.7)))+
+  coord_flip()+
+  ggtitle('$ donated per contributor')
+
+
+plot2045<-ggplot(aes(x=contbr_city,y=n_per_donator),
+       data=data.by_city[nn:NN,])+
+  geom_bar(stat="identity",fill=I('#82b280'))+ 
+  theme(axis.text.y=element_blank(),
+        axis.title.y=element_blank(),
+        axis.title.x=element_blank(),
+        plot.title = element_text(size = rel(0.7)))+
+  coord_flip()+
+  ggtitle('# transactions per contributor')
+
+grid.arrange(plot2041+
+               theme(plot.margin=unit(c(0.5,-0.25,0.5,0.25), "cm")),
+             plot2042+
+               theme(axis.text.y=element_blank(),
+                     axis.title.y=element_blank(),
+                     axis.title.x=element_blank(),
+                     plot.margin=unit(c(0.5,-0.25,0.5,-0.25), "cm")),
+             plot2043+
+               theme(plot.margin=unit(c(0.5,0.25,0.5,-0.25), "cm")), 
+             ncol=3, widths=c(0.4,0.3,0.3), 
+             top="Statitics by city")
+grid.arrange(plot2044, plot2045,  ncol=2, widths=c(0.6,0.4))
+
+```
+
+Although the largest city is Kansas City, the contribution from Saint Louis were much more numerous and more valuable. Some cities (Chesterfield, Ballwin) contributed much more than cities with similar population. This can be explained on case-by-case basis by concentration of particular businesses in that city or strong support for a particular politician.
+
+
+```{r echo=FALSE, warning=FALSE, Bivariate_Plots5}
+# by city
+### amount vs city
+ggplot(aes(x=contbr_city,y=contb_receipt_amt),
+       data=subset(data,contbr_city %in% data.by_city$contbr_city[1:20]))+
+  geom_boxplot(notch = FALSE, position='identity')+
+  #scale_y_reverse()+
+  #coord_cartesian(ylim=c(0,260))
+  coord_flip(ylim=c(0,550))+
+  theme(axis.title.y=element_blank())+
+  ggtitle("Boxplot for transaction amount vs. city")
+
+### total amount per donator vs city
+data.by_donator_and_city=data %>%
+  group_by(contbr_nm,contbr_city,population) %>%
+  get_summary(sorted=FALSE) 
+data.by_donator_and_city$contbr_city<-
+  factor(data.by_donator_and_city$contbr_city, 
+         levels= as.character(data.by_city$contbr_city))
+
+  ggplot(aes(x=contbr_city,y=sum_per_donator), 
+         data=subset(data.by_donator_and_city,contbr_city %in% 
+                       data.by_city$contbr_city[1:30]))+
+  geom_boxplot(notch = FALSE, position='identity')+
+  #scale_y_reverse()+
+  #coord_cartesian(ylim=c(0,260))
+  coord_flip(ylim=c(0,2000))+
+  theme(axis.title.y=element_blank())+
+  ggtitle("Boxplot for amount donated per contributor vs. city")
+
+
+
+# by employer
+nn=1
+NN=30
+plot2061<-ggplot(aes(x=contbr_employer,y=n),
+       data=data.by_employer[nn:NN,])+
+  geom_bar(stat="identity",fill=I('#7d9180'))+ 
+  geom_point(stat="identity",fill=I('#7d9180'),aes(y=donators))+ 
+  theme(axis.title.y=element_blank(),
+        axis.title.x=element_blank(),
+        plot.title = element_text(size = rel(0.7)),
+        axis.text.y=element_text(size = rel(0.8)),
+        axis.text.x=element_text(size = rel(0.7)))+
+  coord_flip()+
+  ggtitle('#contributors (dot) and transactions')+
+  theme(legend.position="top")+
+  guides(color="none")
+plot2062<-ggplot(aes(x=contbr_employer,y=contb_receipt_amt),
+       data=subset(data,contbr_employer %in% 
+                     data.by_employer$contbr_employer[nn:NN]))+
+  geom_bar(stat="identity",fill=I('#eb9180'))+
+  theme(axis.text.y=element_blank(),
+        axis.title.y=element_blank(),
+        axis.title.x=element_blank(),
+        plot.title = element_text(size = rel(0.7)),
+        axis.text.x=element_text(size = rel(0.7)))+
+  coord_flip()+
+  ggtitle('Total amount, $')
+
+plot2063<-ggplot(aes(x=contbr_employer,y=sum_per_donator),
+       data=data.by_employer[nn:NN,])+
+  geom_bar(stat="identity",fill=I('#1daa80'))+ 
+  theme(axis.text.y=element_blank(),
+        axis.title.y=element_blank(),
+        axis.title.x=element_blank(),
+        plot.title = element_text(size = rel(0.7)),
+        axis.text.x=element_text(size = rel(0.7)))+
+  coord_flip()+
+  ggtitle('$ donated per contributor')
+
+
+plot2064<-ggplot(aes(x=contbr_employer,y=n_per_donator),
+       data=data.by_employer[nn:NN,])+
+  geom_bar(stat="identity",fill=I('#82b280'))+ 
+  theme(axis.text.y=element_blank(),
+        axis.title.y=element_blank(),
+        axis.title.x=element_blank(),
+        plot.title = element_text(size = rel(0.7)),
+        axis.text.x=element_text(size = rel(0.7)))+
+  coord_flip()+
+  ggtitle('# transactions per contributor')
+
+grid.arrange(plot2061+theme(plot.margin=unit(c(0.5,0.025,0.5,0.25), "cm")),
+             plot2062+theme(plot.margin=unit(c(0.5,0.025,0.5,0.025), "cm")), 
+             plot2063+theme(plot.margin=unit(c(0.5,0.025,0.5,0.025), "cm")), 
+             plot2064+theme(plot.margin=unit(c(0.5,0.25,0.5,0.025), "cm")), 
+             ncol=4, widths=c(0.44,0.20,0.18,0.18),
+             top="Statitics by employer")
+
+
+
+# by employer and amount per donator
+data.by_donator_and_employer=data %>%
+  group_by(contbr_nm,contbr_employer) %>%
+  get_summary(sorted=FALSE) 
+data.by_donator_and_employer$contbr_employer<-
+  factor(data.by_donator_and_employer$contbr_employer, 
+         levels= as.character(data.by_employer$contbr_employer))
+
+plot2051<- ggplot(aes(x=contbr_employer,y=sum_per_donator), 
+         data=subset(data.by_donator_and_employer,contbr_employer %in% 
+                       data.by_employer$contbr_employer[1:30]))+
+  geom_boxplot(notch = FALSE, position='identity')+
+  #scale_y_reverse()+
+  #coord_cartesian(ylim=c(0,260))+
+  theme(axis.text.y=element_text(size = rel(0.7)))+
+  coord_flip(ylim=c(0,5000))
+  
+  
+plot2052<- ggplot(aes(x=contbr_employer,y=sum_per_donator),
+       data=subset(data.by_donator_and_employer,contbr_employer %in% 
+                     data.by_employer$contbr_employer[1:30]))+
+  #geom_boxplot(notch = FALSE, position='identity', outlier.size=0)+
+  geom_jitter(alpha=0.1)+
+  coord_flip(ylim=c(0,11000))
+
+grid.arrange(
+  plot2051+theme(axis.title.y=element_blank(),
+                 axis.title.x=element_blank()), 
+  plot2052+theme(axis.text.y=element_blank(),
+                axis.title.y=element_blank(),
+                axis.title.x=element_blank()),  
+  ncol=2, widths=c(0.61,0.39),
+  top="Distribution of amount donated per contributor vs. employer")
+
+```
+
+The plot above supports the hypothesis that higher contributions can be due to a concentration of business in particular city. We can see that some employers (*BRYAN CAVE*, *EMERSON*, *Wells Fargo*, *EDWARD JONES*) are characterized by extremely high contributions. Some of them are likely to be localized in a particular city, so they can drive upward the total contributions from that city.
+
+```{r echo=FALSE, warning=FALSE, Bivariate_Plots6}
+
+# by occupation 
+nn=1
+NN=30
+plot2071<-ggplot(aes(x=contbr_occupation,y=n),
+       data=data.by_occupation[nn:NN,])+
+  geom_bar(stat="identity",fill=I('#7d9180'))+ 
+  geom_point(stat="identity",fill=I('#7d9180'),aes(y=donators))+ 
+  theme(axis.title.y=element_blank(),
+        axis.title.x=element_blank(),
+        plot.title = element_text(size = rel(0.7)),
+        axis.text.y=element_text(size = rel(0.8)),
+        axis.text.x=element_text(size = rel(0.7)))+
+  coord_flip()+
+  ggtitle('#contributors (dot) and transactions')+
+  theme(legend.position="top")+
+  guides(color="none")
+plot2072<-ggplot(aes(x=contbr_occupation,y=contb_receipt_amt),
+       data=subset(data,contbr_occupation %in%
+                     data.by_occupation$contbr_occupation[nn:NN]))+
+  geom_bar(stat="identity",fill=I('#eb9180'))+
+  theme(axis.text.y=element_blank(),
+        axis.title.y=element_blank(),
+        axis.title.x=element_blank(),
+        plot.title = element_text(size = rel(0.7)),
+        axis.text.x=element_text(size = rel(0.7)))+
+  coord_flip()+
+  ggtitle('Total amount, $')
+
+plot2073<-ggplot(aes(x=contbr_occupation,y=sum_per_donator),
+       data=data.by_occupation[nn:NN,])+
+  geom_bar(stat="identity",fill=I('#1daa80'))+ 
+  theme(axis.text.y=element_blank(),
+        axis.title.y=element_blank(),
+        axis.title.x=element_blank(),
+        plot.title = element_text(size = rel(0.7)),
+        axis.text.x=element_text(size = rel(0.7)))+
+  coord_flip()+
+  ggtitle('$ donated per contributor')
+
+
+plot2074<-ggplot(aes(x=contbr_occupation,y=n_per_donator),
+       data=data.by_occupation[nn:NN,])+
+  geom_bar(stat="identity",fill=I('#82b280'))+ 
+  theme(axis.text.y=element_blank(),
+        axis.title.y=element_blank(),
+        axis.title.x=element_blank(),
+        plot.title = element_text(size = rel(0.7)),
+        axis.text.x=element_text(size = rel(0.7)))+
+  coord_flip()+
+  ggtitle('# transactions per contributor')
+
+grid.arrange(plot2071+theme(plot.margin=unit(c(0.5,-0.025,0.5,0.25), "cm")),
+             plot2072+theme(plot.margin=unit(c(0.5,-0.025,0.5,-0.025), "cm")), 
+             plot2073+theme(plot.margin=unit(c(0.5,-0.025,0.5,-0.025), "cm")), 
+             plot2074+theme(plot.margin=unit(c(0.5,0.25,0.5,-0.025), "cm")), 
+             ncol=4, widths=c(0.44,0.20,0.18,0.18),
+             top="Statitics by occupation")
+
+
+```
+
+
+
+# Bivariate Analysis
+
+### Talk about some of the relationships you observed in this part of the investigation. How did the feature(s) of interest vary with other features in the dataset?
+
+
+1. Obama got a major part of small receipts, while Romney got most from hefty receipts. 
+The total campaign funds are $4.7M for Obama and $11.4M for Romney. But from those who donated up to $1500 during the campaign, Obama got $2.95M while Romney received only $2.3M
+
+2. Other major Republican candidates (Ron Paul and Rick Santorum), similarly to Democrat Obama, received small contributions to their funds. So, Romney's fundraising campaign differs not only from Obama's campaign, but from the campaigns of other Republican candidates.
+
+3. Cities vary by their contributions to the election funds per unit of population. In the next section I will touch this aspect in more detail.
+
+4. Some cities (Chesterfield, Ballwin) contributed much more than cities with similar population. This can be explained on case-by-case basis by concentration of particular businesses in that city or strong support for a particular politician.
+
+5. The effect of occupation on the size of contributions is very evident. Presidents and executives contributed 2-3 times more than the others on average. However, they typically made fewer transactions. They are either have enough money to pay all they want at once, or just put more value on their time than the other people do.
+
+
+### Did you observe any interesting relationships between the other features (not the main feature(s) of interest)?
+6. Contributions to general elections (vs. primary elections) were made mostly over 3 last months before the Election Day.
+
+7. I did not found any strong relationship between form type ("Indicates what schedule and line number the reporting committee reported a specific transaction", *ftp://ftp.fec.gov/FEC/Presidential_Map/2012/DATA_DICTIONARIES/CONTRIBUTOR_FORMAT.txt*) and other variables. In particular, there is not clear relationship with time or amount of transaction. In the dataset it looks like a quite random variable.
+
+
+### What was the strongest relationship you found?
+The candidate is the major determinant of the contributions. Moreover, it is not the party name (here I talk about Republicans and Democrats only) that determines the result. It is clearly the candidate name that produces consistent results across different dimensions (city, occupation, employer).
+
+
+
+# Multivariate Plots Section
+
+```{r echo=FALSE, warning=FALSE, Multivariate_Plots}
+amount_buckets<-c(0,50,100,200,500,1000,2000,3000,6000)
+print("Distribution of the number of receipts by size buckets")
+table(cut(data$contb_receipt_amt, breaks = amount_buckets))
+
+
+data.positive %>%
+  cbind( amt_grp=cut(data.positive$contb_receipt_amt, 
+                     breaks = amount_buckets)) %>%
+  group_by(
+    cand_nm,amt_grp,
+    contb_receipt_dt=
+      contb_receipt_dt - as.numeric(format(contb_receipt_dt, "%w"))) %>%
+  get_summary(sorted=FALSE) %>%
+  #subset(cand_nm %in% c("Obama, Barack","Romney, Mitt", 
+  #                      "Paul, Ron", "Santorum, Rick")) %>%
+  ggplot(aes(x=contb_receipt_dt, y=n, fill=amt_grp)) +
+  geom_bar(stat="identity") +
+  xlab("Weekly time bucket")+
+  guides(fill=guide_legend(nrow=2,title="Size of transaction, $"))+
+  theme(axis.title.y=element_blank(),
+        axis.title.x=element_blank(),
+        #legend.position="top",
+        legend.key.size=unit(0.4,"cm"),
+        legend.text=element_text(size = rel(0.7)),
+        axis.text.x=element_text(size = rel(0.8)),
+        axis.text.y=element_text(size = rel(0.8)),
+        legend.position=c(0.6,0.05))+
+  scale_x_date(breaks=c(as.Date('2012-10-01'),
+                        as.Date('2012-04-01'),
+                        as.Date('2011-10-01'),
+                        as.Date('2011-04-01')),
+               labels = date_format("%b %y"))+
+  ggtitle("Number of transactions by time and size of transaction")+
+  facet_wrap(~cand_nm, scale="free_y", ncol=3)
+
+
+
+data.positive %>%
+  cbind( 
+    amt_grp=cut(data.positive$contb_receipt_amt, 
+                breaks = amount_buckets)) %>%
+  group_by(
+    cand_nm,amt_grp,
+    contb_receipt_dt=
+      contb_receipt_dt - as.numeric(format(contb_receipt_dt, "%w"))) %>%
+  get_summary(sorted=FALSE) %>%
+  #subset(cand_nm %in% c("Obama, Barack","Romney, Mitt", 
+  #                      "Paul, Ron", "Santorum, Rick")) %>%
+  ggplot(aes(x=contb_receipt_dt, y=sum, fill=amt_grp)) +
+  geom_bar(stat="identity") +
+  xlab("Weekly time bucket")+
+  guides(fill=guide_legend(nrow=2,title="Size of transaction, $"))+
+  theme(axis.title.y=element_blank(),
+        axis.title.x=element_blank(),
+        #legend.position="top",
+        legend.position=c(0.6,0.05),
+        legend.key.size=unit(0.4,"cm"),
+        legend.text=element_text(size = rel(0.7)),
+        axis.text.x=element_text(size = rel(0.8)),
+        axis.text.y=element_text(size = rel(0.8)))+
+  scale_x_date(breaks=c(as.Date('2012-10-01'),
+                        as.Date('2012-04-01'),
+                        as.Date('2011-10-01'),
+                        as.Date('2011-04-01')),
+               labels = date_format("%b %y"))+
+  ggtitle("Sum of contributions by time and size of transaction")+
+  facet_wrap(~cand_nm, scale="free_y", ncol=3)
+
+```
+
+These plots show how each candidate obtained funds to their election campaign. Now I am going to compare Romney and Obama on adjacent plots. I will fill the graphs by amount donated per contributor per week because I find it more important variable then the size of a single transaction.
+
+
+```{r echo=FALSE, warning=FALSE, Multivariate_Plots2}
+# 3 variables
+# facet wrap by candidate and amount by person
+amount_buckets2<-c(0,50,100,200,500,1000,2000,5000,20000)
+data.positive.by_donator_and_week=data.positive %>%
+  group_by(
+    contbr_nm,cand_nm,
+    contb_receipt_dt=
+      contb_receipt_dt - as.numeric(format(contb_receipt_dt, "%w"))) %>%
+  get_summary(sorted=FALSE) 
+
+data.positive.by_donator_and_week<-
+  cbind(data.positive.by_donator_and_week,
+        donated_by_person=
+          cut(data.positive.by_donator_and_week$sum, 
+              breaks = amount_buckets2))
+
+print("Distribution of donated amount over one week by size buckets")
+table(cut(data.positive.by_donator_and_week$sum_per_donator, 
+          breaks = amount_buckets2))
+
+
+plot3011<-data.positive.by_donator_and_week %>%
+  group_by(
+    cand_nm,donated_by_person,
+    contb_receipt_dt=
+      contb_receipt_dt - as.numeric(format(contb_receipt_dt, "%w"))) %>%
+  summarize(n=n(),
+            donators=n_distinct(contbr_nm),
+            sum=sum(sum_per_donator),
+            mean = mean(sum_per_donator),
+          median = median(sum_per_donator),
+          sum_per_donator=sum(sum_per_donator)/n_distinct(contbr_nm),
+          n_per_donator=n()/n_distinct(contbr_nm)
+          ) %>%
+  subset(cand_nm %in% c("Obama, Barack","Romney, Mitt")) %>%
+  ggplot(aes(x=contb_receipt_dt, y=donators, fill=donated_by_person)) +
+  geom_bar(stat="identity") +
+  xlab("Weekly time bucket")+
+  theme(axis.title.y=element_blank(),
+        axis.title.x=element_blank(),
+        legend.position="top",
+        legend.key.size=unit(0.4,"cm"),
+        axis.text.x=element_text(size = rel(0.8)),
+        legend.text=element_text(size = rel(0.8)))+
+  guides(fill=guide_legend(nrow=2,title="Weekly contribution, $"))+
+  ggtitle("Number of contributors per week by time and size of contribution")+
+  facet_wrap(~cand_nm, #scale="free_y", 
+             ncol=2)
+
+plot3012<-data.positive.by_donator_and_week %>%
+  group_by(
+    cand_nm,donated_by_person,
+    contb_receipt_dt=
+      contb_receipt_dt - as.numeric(format(contb_receipt_dt, "%w"))) %>%
+  summarize(n=n(),
+            donators=n_distinct(contbr_nm),
+            sum=sum(sum_per_donator),
+            mean = mean(sum_per_donator),
+          median = median(sum_per_donator),
+          sum_per_donator=sum(sum_per_donator)/n_distinct(contbr_nm),
+          n_per_donator=n()/n_distinct(contbr_nm)
+          ) %>%
+  subset(cand_nm %in% c("Obama, Barack","Romney, Mitt")) %>%
+  ggplot(aes(x=contb_receipt_dt, y=sum, fill=donated_by_person)) +
+  geom_bar(stat="identity") +
+  xlab("Weekly time bucket")+
+  theme(axis.title.y=element_blank(),
+        legend.position="none",
+        axis.text.x=element_text(size = rel(0.8)),
+        axis.text.y=element_text(size = rel(0.7)),
+        legend.text=element_text(size = rel(0.8)),
+        axis.title.x=element_blank())+
+  ggtitle("Amount contributed per week by time and size of contribution")+
+  facet_wrap(~cand_nm, #scale="free_y", 
+             ncol=2)
+grid.arrange(plot3011+theme(plot.margin=unit(c(0.25,0.25,-0.1,0.25), "cm")),
+             plot3012+theme(plot.margin=unit(c(-0.1,0.25,0.25,0.25), "cm")), ncol=1,heights=c(0.55,0.45))
+
+```
+
+Again, we can see that Obama during the whole campaign period received small donations, while Romney received much larger ones.
+
+```{r echo=FALSE, warning=FALSE, Multivariate_Plots3}
+###########################
+### by city, cand_nm and sum donated
+data.by_donator_and_cand_and_city=data %>%
+  group_by(contbr_nm,contbr_city, cand_nm ,population) %>%
+  get_summary(sorted=FALSE) 
+
+data.by_donator_and_cand_and_city$contbr_city<-
+  data.by_donator_and_cand_and_city$contbr_city %>%
+  factor(levels=as.character(data.by_city$contbr_city))
+
+ggplot(aes(x=contbr_city,y=sum_per_donator), 
+         data=subset(data.by_donator_and_cand_and_city,contbr_city %in% 
+                       data.by_city$contbr_city[1:30]   & 
+                       cand_nm %in% c("Obama, Barack","Romney, Mitt") 
+                       ))+
+  geom_bar(stat='identity')+
+  theme(axis.title.y=element_blank(),
+        axis.text.y=element_text(size = rel(0.8)),
+        axis.title.x=element_blank())+
+  coord_flip(ylim=c(0,4000000))+
+  ggtitle("Amount donated to major candidates by city")+
+  facet_wrap(~cand_nm,ncol=2)
+
+
+ggplot(aes(x=contbr_city,y=sum_per_donator), 
+         data=subset(data.by_donator_and_cand_and_city,
+                     contbr_city %in%  data.by_city$contbr_city[1:20] & 
+                       cand_nm %in% c("Obama, Barack","Romney, Mitt") 
+                       ))+
+  geom_boxplot(notch = FALSE, position='identity')+
+  stat_summary( fun.y = mean, colour = 'red', 
+                geom="point",size=3, fill='red')+
+  #scale_y_reverse()+
+  #coord_cartesian(ylim=c(0,260))
+  coord_flip(ylim=c(0,4600))+
+  theme(axis.title.y=element_blank(),
+        axis.text.y=element_text(size = rel(0.8)),
+        axis.title.x=element_blank())+
+  ggtitle("Amount donated per contributor\n(red dot - average amount)")+
+  facet_wrap(~cand_nm,ncol=2)
+
+  
+ggplot(aes(x=contbr_city,y=sum_per_donator),
+       data=subset(data.by_donator_and_cand_and_city,
+                   contbr_city %in%  data.by_city$contbr_city[1:20] & 
+                     cand_nm %in% c("Obama, Barack","Romney, Mitt"))
+       )+
+  stat_summary( fun.y = mean, colour = 'red', 
+                geom="point",size=3, fill='red')+
+  #geom_boxplot(notch = FALSE, position='identity', outlier.size=0)+
+  geom_jitter(alpha=0.1)+
+  coord_flip(ylim=c(0,11000))+
+  theme(axis.title.y=element_blank(),
+        axis.text.y=element_text(size = rel(0.8)),
+        axis.title.x=element_blank())+
+  ggtitle("Amount donated per contributor\n(red dot - average amount)")+
+  facet_wrap(~cand_nm,ncol=2)
+
+
+# Number of transactions per contributor by city to major candidates
+ggplot(aes(x=contbr_city,y=n_per_donator), 
+         data=subset(data.by_donator_and_cand_and_city,
+                     contbr_city %in% data.by_city$contbr_city[1:30] &
+                       cand_nm %in% c("Obama, Barack","Romney, Mitt") 
+                       ))+
+  geom_boxplot(notch = FALSE, position='identity')+
+   stat_summary( fun.y = mean, colour = 'red', 
+                 geom="point",size=3, fill='red')+
+  coord_flip(ylim=c(0,10))+
+  theme(axis.title.y=element_blank(),
+        axis.text.y=element_text(size = rel(0.8)),
+        axis.title.x=element_blank())+
+  ggtitle("Number of transactions per contributor by 
+          city to major candidates\n(red dot - average number)")+
+  facet_wrap(~cand_nm,ncol=2)
+
+```
+
+Here we have a closer look at the difference between performance of fundraising campaign for Obama and Romney in top cities by population. 
+It is now clear that high amount of contributions in Joplin, Chesterfield, Jefferson City and some other cities (if compared with cities with similar population) is due to much high donations to Romney's fund.
+
+Interestingly, Romney managed to get high-amount donations across all the major cities, not just in a few of them. Similarly, donations (per person) to Obama's fund were small across all the major cities.
+
+
+
+
+```{r echo=FALSE, warning=FALSE, Multivariate_Plots4}
+
+# donation/population
+data.by_city_and_candidate<-
+  get_summary(group_by(data,contbr_city,cand_nm,population),
+              sorted=FALSE)
+data.by_city_and_candidate$contbr_city<-
+  factor(data.by_city_and_candidate$contbr_city, 
+         levels= as.character(data.by_city$contbr_city))
+
+
+# compare Obama and Romney by city: contributors per 1000 people
+ggplot(aes(x=contbr_city,y=1000*donators/population,fill=cand_nm), 
+         data=subset(data.by_city_and_candidate,
+                     contbr_city %in% data.by_city$contbr_city[1:20]  & 
+                       cand_nm %in% c("Obama, Barack","Romney, Mitt") 
+                     ))+
+  geom_hline(yintercept=
+               with(subset(data.by_city_and_candidate,
+                           cand_nm=="Obama, Barack"&!is.na(population)),
+                    sum(donators)/sum(population)), 
+             color='red',size=1, linetype=2)+
+  geom_hline(yintercept=
+               with(subset(data.by_city_and_candidate,
+                           cand_nm=="Romney, Mitt"&!is.na(population)),
+                    sum(donators)/sum(population)), 
+             color='cyan',size=1, linetype=2)+
+  geom_bar(stat='identity',position="dodge",color='black')+
+  theme(axis.title.y=element_blank(),
+        axis.text.y=element_text(size = rel(0.8)),
+        axis.title.x=element_blank())+
+  guides(fill=guide_legend(title="Candidate"))+
+  ggtitle("Contributors per 1000 inhabitants")+
+  coord_flip(ylim=c(0,11))
+
+
+print("Contributors per 1000 people: all cities")
+print(paste("Obama: ",
+            format(with(subset(data.by_city_and_candidate,
+                               cand_nm=="Obama, Barack"&!is.na(population)),
+                        1000*sum(donators)/sum(population)),digits=3), 
+            "   Romney: ",
+            format(with(subset(data.by_city_and_candidate,
+                               cand_nm=="Romney, Mitt"&!is.na(population)),
+                        1000*sum(donators)/sum(population)),digits=3)))
+
+
+print(paste("Contributors per 1000 people: ",
+            "all cities except Kansas City and Saint Louis",sep=""))
+print(paste(
+  "Obama: ",
+  format(with(subset(data.by_city_and_candidate,
+                     cand_nm=="Obama, Barack"&!is.na(population)&
+                       !contbr_city %in% c("KANSAS CITY", "SAINT LOUIS")),
+              1000*sum(donators)/sum(population)), digits=3), 
+  "   Romney: ",
+  format(with(subset(data.by_city_and_candidate,cand_nm=="Romney, Mitt"&
+                       !is.na(population)& !contbr_city %in% 
+                       c("KANSAS CITY", "SAINT LOUIS")),
+              1000*sum(donators)/sum(population)),digits=3)))
+```
+
+Earlier we saw that Obama's fund received donations from more people. Now it turns out that such a high performance is mostly due to better results in the two largest cities: Kansas City and Saint Louis. If we exclude these two cities, the number of contributors per 1000 people is nearly the same for the two top candidates: 1.84 for Obama and 1.52 for Romney. It should be noted here, that Kansas City and Saint Louis are the only two counties where Obama won the election (*https://en.wikipedia.org/wiki/United_States_presidential_election_in_Missouri,_2012*). 
+
+
+```{r echo=FALSE, warning=FALSE, Multivariate_Plots5}
+# I already have data frame df_population_groups with some statistics for groups of cities specified by city_population_buckets.
+# now I want to add to this dataframe columns for Romney and Obama.
+
+# first, create statistics for candidates
+
+df_pop_groups_and_candidate=data.by_city_and_candidate %>%
+  cbind(pop_grp=
+          cut(data.by_city_and_candidate$population, 
+              breaks = city_population_buckets)) %>%
+  group_by(pop_grp,cand_nm) %>%
+  summarize(ncities=n(),
+            totalpopulation=sum(population,na.rm=TRUE),
+            donators=sum(donators),
+            sum=sum(sum)
+          ) 
+df_population_groups$totalpopulation[
+  is.na(df_population_groups$pop_grp)]<-NA
+
+# second, merge it with df_population_groups
+df_pop_groups_and_candidate<-rbind(
+  cbind(df_population_groups,
+         cand_nm="Obama, Barack",
+         donators_cnd=subset(df_pop_groups_and_candidate,
+                             cand_nm=="Obama, Barack")$donators,
+         sum_cnd=subset(df_pop_groups_and_candidate,
+                        cand_nm=="Obama, Barack")$sum
+         ),
+  cbind(df_population_groups,
+         cand_nm="Romney, Mitt",
+         donators_cnd=subset(df_pop_groups_and_candidate,
+                             cand_nm=="Romney, Mitt")$donators,
+         sum_cnd=subset(df_pop_groups_and_candidate,
+                        cand_nm=="Romney, Mitt")$sum
+         )
+  )
+
+# third, create plots
+
+# number of donators per 1000 inhabitans
+plot3021<-ggplot(aes(x=pop_grp,
+                     y=1000*donators_cnd/totalpopulation,fill=cand_nm), 
+         data=df_pop_groups_and_candidate[
+           !is.na(df_pop_groups_and_candidate$pop_grp),])+
+  geom_bar(stat='identity',position="dodge",color='black')+
+  ggtitle("Contributors per 1000 inhabitans")+
+  guides(fill=guide_legend(title="Candidate"))+
+  theme(legend.position=c(0.3,0.7),
+        axis.title.x=element_blank(),
+        axis.title.y=element_blank(),
+        axis.text.x= element_text(angle = 90),
+        axis.text=element_text(size = rel(0.9)),
+        plot.title=element_text(size = rel(0.8)))
+
+#### amount donated per 1000 inhabitans
+plot3022<-ggplot(aes(x=pop_grp,
+                     y=1000*sum_cnd/totalpopulation,fill=cand_nm), 
+         data=df_pop_groups_and_candidate[!is.na(
+           df_pop_groups_and_candidate$pop_grp),])+
+  geom_bar(stat='identity',position="dodge",color='black')+ 
+  ggtitle("Amount donated ($) per 1000 inhabitans")+
+  guides(fill=guide_legend(title="Candidate"))+
+  theme(legend.position=c(0.3,0.7),
+        axis.title.x=element_blank(),
+        axis.title.y=element_blank(),
+        axis.text.x= element_text(angle = 90),
+        plot.title = element_text(size = rel(0.8)),
+        axis.text=element_text(size = rel(0.9)))
+  
+grid.arrange(plot3021+
+               theme(plot.margin=unit(c(0.25,0,0.25,0.25), "cm")),
+             plot3022+
+               theme(plot.margin=unit(c(0.25,0.25,0,0.25), "cm")), 
+             ncol=2,widths=c(0.5,0.5))
+```
+
+Wow! In towns up to 20k inhabitants (they account for 43% of the total state population) the number of contributors is the same for the two top candidates. It is in towns above 20k people where Obama get donations from more people than Romney do. However, no matter high or small is the population, contributors to the Romney's fund are a lot more generous.  
+
+
+
+
+```{r echo=FALSE, warning=FALSE, Multivariate_Plots6}
+###### scatterplot of donators by city and employer
+data %>%
+  group_by(contbr_nm,contbr_city,cand_nm,contbr_employer ) %>%
+  get_summary(sorted=FALSE) %>%
+  subset(contbr_city %in% data.by_city$contbr_city[1:20] &
+           contbr_employer %in% data.by_employer$contbr_employer[1:30] &
+           cand_nm %in% c("Obama, Barack","Romney, Mitt")) %>%
+  ggplot(aes(x=contbr_city, y=contbr_employer))+
+  geom_jitter(alpha=0.3)+
+  theme(axis.text.x= element_text(angle = 90),
+        axis.text=element_text(size = rel(0.7)),
+        axis.title=element_blank())+
+  ggtitle("Scatterplot: contribitors by city and employer")+
+  facet_wrap(~cand_nm, ncol=2)
+
+data %>%
+  group_by(contbr_nm,contbr_occupation,cand_nm,contbr_employer ) %>%
+  get_summary(sorted=FALSE) %>%
+  subset(#contbr_city %in% data.by_city$contbr_city[1:20] &
+           contbr_employer %in% data.by_employer$contbr_employer[1:30] &
+             contbr_occupation %in% 
+             data.by_occupation$contbr_occupation[1:20] &
+           cand_nm %in% c("Obama, Barack","Romney, Mitt")) %>%
+  ggplot(aes(x=contbr_occupation, y=contbr_employer))+
+  geom_jitter(alpha=0.3)+
+  theme(axis.text.x= element_text(angle = 90),
+        axis.text=element_text(size = rel(0.7)),
+        axis.title=element_blank())+
+  ggtitle("Scatterplot: Contributors by occupation and employer")+
+  facet_wrap(~cand_nm, ncol=2)
+
+```
+
+Here we can have a closer look at who are the contributors. It turns out the engineers work for Boeing and support Obama. Emerson is located in Saint Louis and Chesterfield and its employees support Romney. The employees of the State of Missouri support Obama (quite interesting given the fact that Romney won the election in the state).
+
+
+# Multivariate Analysis
+
+### Talk about some of the relationships you observed in this part of the investigation. Were there features that strengthened each other in terms of looking at your feature(s) of interest?
+
+1. For towns with up to 20k population, the number of contributors per 1000 inhabitants is the same for Obama and Romney. Obama got more contributors that Romney in larger cities and especially outperformed Romney in the two largest cities Kansas City and Saint Louis. Obama got much support from universities.
+
+I think that high number of Obama's contributors in the two largest cities can be an important explanation of his victory in those cities (given the fact  he lost the elections in the other Missouri counties *https://en.wikipedia.org/wiki/United_States_presidential_election_in_Missouri,_2012*). This is because people who donated not-very-large amounts of money are more likely to be actively involved in the campaign as volunteers or convince their friends and neighbors to vote for their candidate. 
+
+2. Romney got much higher average donation per contributor across all city population groups.
+
+3. High amount of contributions in Joplin, Chesterfield, Jefferson City and some other cities (if compared with cities with similar population) is due to much higher donations to Romney's fund.
+
+
+
+
+### Were there any interesting or surprising interactions between features?
+
+The employees of the State of Missouri gave more support Obama. This is quite interesting given the fact that Romney won the election in Missouri.
+
+If the information about occupation and employer was not provided, the Romney's staff reported it as "Information requested per best efforts" while the Obama's staff reported similar transactions as "Information requested".
+
+General Motors is represented by retired workers who support Obama.
+
+### OPTIONAL: Did you create any models with your dataset? Discuss the strengths and limitations of your model.
+
+
+No. I believe the variables in the dataset predict too little information about the campaign result. The results also strongly depend on candidates' programs or the current issues on the nation's agenda, but such information is not captured in the dataset. So, there is no point of constructing a model of little predictive power.  The dataset is better to be used for revealing the trends and assessing the campaign performance.
+
+
+
+------
+
+# Final Plots and Summary
+
+### Plot One
+```{r echo=FALSE, Plot_One}
+data.positive %>%
+  cbind( 
+    amt_grp=cut(data.positive$contb_receipt_amt, 
+                breaks = amount_buckets)) %>%
+  group_by(
+    cand_nm,amt_grp,
+    contb_receipt_dt=
+      contb_receipt_dt - as.numeric(format(contb_receipt_dt, "%w"))) %>%
+  get_summary(sorted=FALSE) %>%
+  #subset(cand_nm %in% c("Obama, Barack","Romney, Mitt", 
+  #                      "Paul, Ron", "Santorum, Rick")) %>%
+  ggplot(aes(x=contb_receipt_dt, y=sum, fill=amt_grp)) +
+  geom_bar(stat="identity") +
+  xlab("Weekly time bucket")+
+  ylab("Amount received ($)")+
+  guides(fill=guide_legend(nrow=2,title="Size of transaction, $"))+
+  theme(#axis.title.y=element_blank(),
+        #axis.title.x=element_blank(),
+        #legend.position="top",
+        legend.position=c(0.7,0.1),
+        legend.key.size=unit(0.4,"cm"),
+        legend.text=element_text(size = rel(0.7)),
+        axis.text.x=element_text(size = rel(0.8)),
+        axis.text.y=element_text(size = rel(0.8)))+
+  scale_x_date(breaks=c(as.Date('2012-10-01'),
+                        as.Date('2012-04-01'),
+                        as.Date('2011-10-01'),
+                        as.Date('2011-04-01')),
+               labels = date_format("%b %y"))+
+  ggtitle("Weekly amount of contributions ($) by size of transaction")+
+  facet_wrap(~cand_nm, scale="free_y", ncol=3)
+```
+
+### Description One
+This plot is a good start for understanding the funding strategies of all the candidates over the campaign period. We can see the leaders by amount received and have a good guess of where the contributions to their funds came from. 
+
+For example, Obama and Romney are the top candidates. They got more money in the latest months prior the Election Date. Obama received much smaller amounts per transaction than Romney did. 
+
+### Plot Two
+```{r echo=FALSE, Plot_Two}
+# Average weekly donation per contributor over time
+# Romney ~$1000, Obama,Paul and Santorum close to $100
+data.positive %>%
+  group_by(
+    cand_nm,
+    contb_receipt_dt=
+      contb_receipt_dt - as.numeric(format(contb_receipt_dt, "%w"))) %>%
+  get_summary(sorted=FALSE) %>%
+  subset(cand_nm %in% c("Obama, Barack","Romney, Mitt", 
+                        "Paul, Ron", "Santorum, Rick")) %>%
+  ggplot(aes(x=contb_receipt_dt, y=sum_per_donator, color=cand_nm)) +
+  geom_line(stat="identity", size=0.7) +
+  guides(fill=guide_legend(title="Candidate"))+
+  theme(axis.title.x=element_text(size = rel(0.8)))+
+  scale_y_log10()+
+  ggtitle("Average amount donated by contributor per week")+
+  xlab("Weekly time bucket")+
+  ylab("Average amount donated ($)")
+
+```
+
+### Description Two
+
+One may assume that Romney's success in attracting hefty donations is due to the fact that he is from the Republican Party. However, the graph shows that this is not the case.
+
+Only Romney received hefty contributions during the whole campaign period. The average weekly donation to the funds of other major Republican candidates was similar to Obama's numbers, not Romney's numbers. The average weekly donation during high campaign season to the Romney's fund could be 10 times higher than to the funds of the other major candidates.
+
+
+
+### Plot Three
+```{r echo=FALSE, Plot_Three}
+ggplot(aes(x=pop_grp,
+                     y=1000*donators_cnd/totalpopulation,fill=cand_nm), 
+         data=df_pop_groups_and_candidate[
+           !is.na(df_pop_groups_and_candidate$pop_grp),])+
+  geom_bar(stat='identity',position="dodge",color='black')+
+  ggtitle("Contributors per 1000 inhabitans")+
+  guides(fill=guide_legend(title="Candidate"))+
+  xlab("Population range")+
+  scale_x_discrete(labels=c("<1k","1-5k","3-10k","10-20k","20-50k",
+                            "50-100k","100-300k",
+                            "300-400k\nSaint Louis",
+                            "400-500k\nKansas City"))+
+  theme(axis.title.y=element_blank(),
+        legend.position="top")
+```
+
+### Description Three
+The number of contributors is the same for Obama and Romney in towns up to 20k people. In larger cities, Obama recruits slightly more donators than Romney. Moreover, Obama drastically outperforms Romney in the two largest cities. 
+
+
+------
+
+# Reflection
+The dataset I analyzed have a few problems:
+
+1. There are a number of errors. I had to clean entries with erroneous zip codes or transactions of zero amount. In addition, I had to do an intensive cleaning of city and employer variables in order to obtain the results I can trust.
+
+2. Transactions after the Election Date are not likely to be representative, so I had to exclude them, too.
+
+3. Many refunds or retransfers (negative amount transactions) cannot be matched with their original transactions. I had to exclude such transaction when analyzing time series.
+
+4. The dataset for Missouri is special because Republican primaries were held in this state in 2012. So, there are a number of different Republican candidates to analyze.
+
+It was easy to find the major candidates: Barack Obama (became the President, but lost the election in Missouri) and Mitt Romney (won throughout Missouri, except the two largest cities). It was evident from the beginning that they pursued very different fundraising strategies: Obama got many and small donations while Romney relied on large donations. However, the whole picture was not clear to me at the beginning.
+
+Fortunately, I managed to get two results I proud of. The first (final plot two) explains that Romney's campaign is strikingly different even from campaigns of the other major Republican candidates, as well as Obama's campaigns. The average weekly contribution to Romney's fund could be up to 10 (!) times higher than to the other's funds. This is a very substantial difference given the high number of contributors (i.e. the results are far from random).
+
+The second (final plot three) shed light on where Obama's donators come from. They are from larger cities, especially the two largest cities Kansas City and Saint Louis. In terms of number of contributors, Obama did no better than Romney in towns with up to 20k inhabitants (these towns account for 43% of the total state population).
+
+I think that a better conversion rate into donators is one of the key requirements for an election campaign to succeed. So, the next step of research could be to estimate to what extent Obama's fundraising campaign (i.e. focus on more donators and smaller transactions) helped him to win in the two largest cities in Missouri and possibly obtain higher results in other cities.
+
+One question remains unexplained to me: How Romney managed to get hefty contributions across different cities, employers and occupations. I will research this topic in the future. I think this is not about data analysis. The key is very likely to be in the campaign architecture. 
+
+
+
+
+
+
+
+
+
